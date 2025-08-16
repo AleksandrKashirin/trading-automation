@@ -34,8 +34,7 @@ def main():
     try:
         scheduler.start_daily_scheduler()
     except KeyboardInterrupt:
-        print("
-🛑 Бот остановлен")
+        print("🛑 Бот остановлен")
 
 if __name__ == "__main__":
     main()
