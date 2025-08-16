@@ -4,9 +4,10 @@ Tokens/
 *.key
 .env
 .env.local
-.csv
-.json
-.txt
+*.csv
+*.json
+*.txt
+*.png
 data/
 
 # === Python ===
