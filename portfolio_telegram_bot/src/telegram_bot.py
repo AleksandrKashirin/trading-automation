@@ -1,43 +1,48 @@
 """Telegram бот"""
 import logging
 from typing import List
-import telegram
-from telegram.constants import ParseMode
+import requests
 
 logger = logging.getLogger(__name__)
 
 class TelegramBot:
     def __init__(self, token: str, chat_id: int):
-        self.bot = telegram.Bot(token=token)
+        self.token = token
         self.chat_id = chat_id
+        self.api_url = f"https://api.telegram.org/bot{token}"
     
-    def send_message(self, text: str, parse_mode=ParseMode.MARKDOWN) -> None:
+    def send_message(self, text: str, parse_mode='Markdown') -> None:
         """Отправка сообщения"""
         try:
-            self.bot.send_message(
-                chat_id=self.chat_id,
-                text=text,
-                parse_mode=parse_mode
-            )
+            url = f"{self.api_url}/sendMessage"
+            data = {
+                'chat_id': self.chat_id,
+                'text': text,
+                'parse_mode': parse_mode
+            }
+            response = requests.post(url, data=data)
+            response.raise_for_status()
         except Exception as e:
             logger.error(f"Ошибка отправки сообщения: {e}")
     
     def send_photo(self, photo_path: str, caption: str = "") -> None:
         """Отправка фото"""
         try:
+            url = f"{self.api_url}/sendPhoto"
             with open(photo_path, 'rb') as photo:
-                self.bot.send_photo(
-                    chat_id=self.chat_id,
-                    photo=photo,
-                    caption=caption,
-                    parse_mode=ParseMode.MARKDOWN
-                )
+                files = {'photo': photo}
+                data = {
+                    'chat_id': self.chat_id,
+                    'caption': caption,
+                    'parse_mode': 'Markdown'
+                }
+                response = requests.post(url, files=files, data=data)
+                response.raise_for_status()
         except Exception as e:
             logger.error(f"Ошибка отправки фото: {e}")
     
     def send_long_message(self, text: str) -> None:
         """Отправка длинного сообщения с разбивкой"""
-        # Разбивка на части по 4096 символов
         max_length = 4096
         for i in range(0, len(text), max_length):
             part = text[i:i + max_length]

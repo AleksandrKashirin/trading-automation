@@ -19,16 +19,14 @@ class ReportFormatter:
         parts = []
         current_part = ""
         
-        for line in text.split('
-'):
+        for line in text.split(''):
             if len(current_part) + len(line) + 1 > max_length:
                 if current_part:
                     parts.append(current_part.strip())
                 current_part = line
             else:
                 if current_part:
-                    current_part += '
-' + line
+                    current_part += '' + line
                 else:
                     current_part = line
         
