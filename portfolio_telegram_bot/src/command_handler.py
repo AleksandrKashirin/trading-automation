@@ -34,6 +34,7 @@ class CommandHandler:
             '/race': self._cmd_race,
             '/chart': self._cmd_chart,
             '/report': self._cmd_full_report,
+            '/pnl': self._cmd_pnl
         }
         
         # Установка команд в Telegram
@@ -49,6 +50,7 @@ class CommandHandler:
             {'command': 'race', 'description': '🏁 Отчет о гонке'},
             {'command': 'chart', 'description': '📈 График гонки'},
             {'command': 'report', 'description': '📋 Полный отчет'},
+            {'command': 'pnl', 'description': '📋 PNL'},
         ]
         
         if self.telegram_bot.set_commands(commands_list):
@@ -94,6 +96,81 @@ class CommandHandler:
             except Exception as e:
                 logger.error(f"Ошибка в polling loop: {e}")
                 time.sleep(5)  # Пауза при ошибке
+
+    def _cmd_pnl(self, message: dict) -> None:
+        """Команда /pnl - детальный анализ P&L"""
+        try:
+            if not self.config.BOT_TRADER_ACCOUNT_ID:
+                self.telegram_bot.send_message("❌ Портфель Бот-трейдер не настроен")
+                return
+            
+            self.telegram_bot.send_message("📊 Анализирую P&L...")
+            
+            # Получаем детальные данные P&L
+            pnl_data = self.portfolio_analyzer.calculate_total_pnl_from_inception(
+                self.config.BOT_TRADER_ACCOUNT_ID
+            )
+            
+            # Форматируем детальный отчет
+            pnl_report = self._format_detailed_pnl(pnl_data)
+            self.telegram_bot.send_message(pnl_report)
+            
+        except Exception as e:
+            error_text = self.report_formatter.format_error_report(str(e), "Анализ P&L")
+            self.telegram_bot.send_message(error_text)
+
+    def _format_detailed_pnl(self, pnl_data: Dict) -> str:
+        """Форматирование детального отчета P&L"""
+        try:
+            total_pnl = pnl_data.get("total_pnl", 0)
+            money_invested = pnl_data.get("money_invested", 0)
+            money_withdrawn = pnl_data.get("money_withdrawn", 0)
+            dividends = pnl_data.get("dividends_received", 0)
+            commissions = pnl_data.get("commissions_paid", 0)
+            current_equity = pnl_data.get("current_equity", 0)
+            net_invested = pnl_data.get("net_invested", 0)
+            
+            # Расчеты
+            pnl_percent = (total_pnl / net_invested * 100) if net_invested > 0 else 0
+            commission_percent = (commissions / money_invested * 100) if money_invested > 0 else 0
+            dividend_yield = (dividends / net_invested * 100) if net_invested > 0 else 0
+            
+            report = []
+            report.append("💰 *ДЕТАЛЬНЫЙ АНАЛИЗ P&L*")
+            report.append("")
+            
+            # Движение денежных средств
+            report.append("*ДВИЖЕНИЕ СРЕДСТВ:*")
+            report.append(f"💳 Пополнения: {money_invested:+,.0f} ₽")
+            report.append(f"💸 Выводы: {money_withdrawn:+,.0f} ₽")
+            report.append(f"📊 Чистые инвестиции: {net_invested:+,.0f} ₽")
+            report.append("")
+            
+            # Доходы
+            report.append("*ДОХОДЫ:*")
+            report.append(f"📈 Общий P&L: {total_pnl:+,.0f} ₽ ({pnl_percent:+.2f}%)")
+            if dividends > 0:
+                report.append(f"💰 Дивиденды: {dividends:+,.0f} ₽ ({dividend_yield:.2f}%)")
+            report.append("")
+            
+            # Расходы
+            report.append("*РАСХОДЫ:*")
+            report.append(f"🏦 Комиссии: {commissions:,.0f} ₽ ({commission_percent:.2f}%)")
+            report.append("")
+            
+            # Текущее состояние
+            report.append("*ТЕКУЩЕЕ СОСТОЯНИЕ:*")
+            report.append(f"💼 Стоимость портфеля: {current_equity:,.0f} ₽")
+            
+            # Эффективность
+            if net_invested > 0:
+                annualized_return = total_pnl / net_invested * 100  # Упрощенно
+                report.append(f"📊 Эффективность: {annualized_return:.2f}%")
+            
+            return "\n".join(report)
+            
+        except Exception as e:
+            return f"❌ Ошибка форматирования P&L отчета: {e}"
     
     def _process_update(self, update: dict) -> None:
         """Обработка одного обновления"""
@@ -139,6 +216,7 @@ class CommandHandler:
             "🏁 /race - отчет о гонке",
             "📈 /chart - график гонки",
             "📋 /report - полный отчет",
+            "📋 /pnl - PNL",
             "❓ /help - справка",
             "",
             f"⏰ Автоматические отчеты: {self.config.REPORT_TIME}",

@@ -19,12 +19,19 @@ class ReportFormatter:
             positions_count = summary.get("positions_count", 0)
             
             # P&L с открытия счета
-            total_pnl_inception = analysis.get("total_pnl_from_inception", total_pnl)
+            pnl_inception_data = analysis.get("total_pnl_from_inception", {})
+            if isinstance(pnl_inception_data, dict):
+                total_pnl_inception = pnl_inception_data.get("total_pnl", total_pnl)
+                money_invested = pnl_inception_data.get("money_invested", 0)
+                dividends_received = pnl_inception_data.get("dividends_received", 0)
+            else:
+                total_pnl_inception = pnl_inception_data if pnl_inception_data else total_pnl
+                money_invested = total_equity - total_pnl if total_equity > total_pnl else total_equity
+                dividends_received = 0
             
             # Расчет процента доходности
-            invested_amount = total_equity - total_pnl if total_equity > total_pnl else total_equity
-            pnl_percent = (total_pnl / invested_amount * 100) if invested_amount > 0 else 0
-            pnl_inception_percent = (total_pnl_inception / invested_amount * 100) if invested_amount > 0 else 0
+            pnl_percent = (total_pnl / money_invested * 100) if money_invested > 0 else 0
+            pnl_inception_percent = (total_pnl_inception / money_invested * 100) if money_invested > 0 else 0
             
             report = []
             report.append(f"🤖 *{account_name.upper()}*")
@@ -33,9 +40,12 @@ class ReportFormatter:
             
             # Общий капитал и прибыль
             report.append(f"💰 *ОБЩИЙ КАПИТАЛ:* {total_equity:,.0f} ₽")
-            if total_pnl_inception != total_pnl:
-                report.append(f"📈 *P&L С ОТКРЫТИЯ:* {total_pnl_inception:+,.0f} ₽ ({pnl_inception_percent:+.1f}%)")
+            report.append(f"📈 *P&L С ОТКРЫТИЯ:* {total_pnl_inception:+,.0f} ₽ ({pnl_inception_percent:+.1f}%)")
             report.append(f"📊 *P&L ТЕКУЩИЙ:* {total_pnl:+,.0f} ₽ ({pnl_percent:+.1f}%)")
+            
+            if dividends_received > 0:
+                report.append(f"💸 *ДИВИДЕНДЫ:* {dividends_received:+,.0f} ₽")
+            
             report.append("")
             
             # Позиции
@@ -91,6 +101,33 @@ class ReportFormatter:
             
         except Exception as e:
             return f"❌ Ошибка форматирования отчета: {e}"
+    
+    @staticmethod 
+    def format_trading_history(operations: List[Dict]) -> str:
+        """Форматирование истории операций для Telegram"""
+        if not operations:
+            return "📝 *ИСТОРИЯ ОПЕРАЦИЙ*\n\nОпераций за последний месяц не найдено"
+        
+        report = []
+        report.append("📝 *ИСТОРИЯ ОПЕРАЦИЙ* (30 дней)")
+        report.append("")
+        
+        # Показываем только последние 10 операций для экономии места
+        recent_operations = operations[:10]
+        
+        for op in recent_operations:
+            op_type = "🟢" if op["operation_type"] == "Покупка" else "🔴"
+            date = op["date"].split()[0]  # Только дата без времени
+            
+            report.append(f"{op_type} *{op['ticker']}* ({date})")
+            report.append(f"{op['operation_type']}: {op['quantity']} шт × {op['price']:.2f} ₽")
+            report.append(f"Сумма: {op['amount']:,.0f} ₽")
+            report.append("")
+        
+        if len(operations) > 10:
+            report.append(f"... и еще {len(operations) - 10} операций")
+        
+        return "\n".join(report)
     
     @staticmethod
     def format_race_report(data: Dict) -> str:

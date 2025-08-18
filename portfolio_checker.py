@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
 Скрипт для получения состояния портфеля через API Тинькофф Инвестиций
-Генерирует текстовый отчет вместо JSON
+Генерирует текстовый отчет с историей операций и общей прибылью
 """
 
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
+import pytz
 from decimal import Decimal
 from typing import Dict, List, Optional
 
@@ -31,7 +32,7 @@ def money_value_to_decimal(money: MoneyValue) -> Decimal:
 
 
 def get_portfolio_data(
-    token: str, account_id: Optional[str] = None, debug: bool = False
+    token: str, account_id: Optional[str] = None, debug: bool = False, include_operations: bool = True
 ) -> Dict:
     """
     Получение данных портфеля с улучшенными расчетами
@@ -307,13 +308,145 @@ def get_portfolio_data(
                 }
 
             return portfolio_data
+        except:
+            pass
 
-        except RequestError as e:
-            logger.error(f"Ошибка API: {e}")
-            raise
-        except Exception as e:
-            logger.error(f"Неожиданная ошибка: {e}")
-            raise
+def get_portfolio_operations(client: Client, account_id: str, days_back: int = 365) -> List[Dict]:
+    """Получение операций по портфелю за указанный период"""
+    try:
+        # Период для запроса операций
+        to_date = datetime.now(pytz.UTC)
+        from_date = to_date - timedelta(days=days_back)
+        
+        operations_response = client.operations.get_operations(
+            account_id=account_id,
+            from_=from_date,
+            to=to_date
+        )
+        
+        operations = []
+        for op in operations_response.operations:
+            # Фильтруем только операции покупки/продажи
+            if op.operation_type.name in ['OPERATION_TYPE_BUY', 'OPERATION_TYPE_SELL']:
+                # Получаем информацию об инструменте
+                instrument_name = "Unknown"
+                try:
+                    if op.figi:
+                        # Пробуем получить информацию об инструменте
+                        try:
+                            instrument_response = client.instruments.share_by(id_type=1, id=op.figi)
+                            instrument_name = instrument_response.instrument.ticker
+                        except RequestError:
+                            try:
+                                instrument_response = client.instruments.bond_by(id_type=1, id=op.figi)
+                                instrument_name = instrument_response.instrument.ticker
+                            except RequestError:
+                                try:
+                                    instrument_response = client.instruments.etf_by(id_type=1, id=op.figi)
+                                    instrument_name = instrument_response.instrument.ticker
+                                except RequestError:
+                                    instrument_name = f"FIGI_{op.figi[:8]}"
+                except Exception:
+                    instrument_name = "Unknown"
+                
+                operation_data = {
+                    "date": op.date.strftime("%Y-%m-%d %H:%M:%S"),
+                    "type": "Покупка" if op.operation_type.name == 'OPERATION_TYPE_BUY' else "Продажа",
+                    "instrument": instrument_name,
+                    "figi": op.figi,
+                    "quantity": int(op.quantity),
+                    "price": float(money_value_to_decimal(op.price)) if op.price else 0,
+                    "payment": float(money_value_to_decimal(op.payment)) if op.payment else 0,
+                    "currency": op.currency,
+                    "commission": float(money_value_to_decimal(op.commission)) if op.commission else 0
+                }
+                operations.append(operation_data)
+        
+        # Сортируем по дате (новые сначала)
+        operations.sort(key=lambda x: x["date"], reverse=True)
+        return operations
+        
+    except Exception as e:
+        logger.error(f"Ошибка получения операций: {e}")
+        return []
+
+
+def calculate_total_portfolio_profit(portfolio_data: Dict, operations: List[Dict]) -> Dict:
+    """Расчет общей прибыли портфеля на основе операций"""
+    try:
+        # Группируем операции по инструментам
+        instruments_operations = {}
+        total_invested = 0
+        total_withdrawn = 0
+        
+        for op in operations:
+            figi = op["figi"]
+            if not figi:
+                continue
+                
+            if figi not in instruments_operations:
+                instruments_operations[figi] = {
+                    "ticker": op["instrument"],
+                    "buys": [],
+                    "sells": []
+                }
+            
+            if op["type"] == "Покупка":
+                instruments_operations[figi]["buys"].append(op)
+                total_invested += abs(op["payment"])
+            else:
+                instruments_operations[figi]["sells"].append(op)
+                total_withdrawn += abs(op["payment"])
+        
+        # Рассчитываем нереализованную прибыль (из текущих позиций)
+        unrealized_pnl = portfolio_data["summary"]["total_pnl"]
+        
+        # Рассчитываем реализованную прибыль
+        realized_pnl = 0
+        for figi, ops in instruments_operations.items():
+            # Простой расчет: продажи минус покупки для закрытых позиций
+            total_buy_amount = sum(abs(op["payment"]) for op in ops["buys"])
+            total_sell_amount = sum(abs(op["payment"]) for op in ops["sells"])
+            
+            if ops["sells"]:  # Если были продажи
+                sell_quantity = sum(op["quantity"] for op in ops["sells"])
+                buy_quantity = sum(op["quantity"] for op in ops["buys"])
+                
+                if sell_quantity > 0:
+                    # Пропорциональный расчет для частичных продаж
+                    avg_buy_price = total_buy_amount / buy_quantity if buy_quantity > 0 else 0
+                    avg_sell_price = total_sell_amount / sell_quantity if sell_quantity > 0 else 0
+                    
+                    sold_cost = avg_buy_price * sell_quantity
+                    realized_pnl += (total_sell_amount - sold_cost)
+        
+        # Общая прибыль = нереализованная + реализованная
+        total_profit = unrealized_pnl + realized_pnl
+        
+        # Процент доходности
+        total_profit_percent = (total_profit / total_invested * 100) if total_invested > 0 else 0
+        
+        return {
+            "total_invested": total_invested,
+            "total_withdrawn": total_withdrawn,
+            "unrealized_pnl": unrealized_pnl,
+            "realized_pnl": realized_pnl,
+            "total_profit": total_profit,
+            "total_profit_percent": total_profit_percent,
+            "net_invested": total_invested - total_withdrawn
+        }
+        
+    except Exception as e:
+        logger.error(f"Ошибка расчета общей прибыли: {e}")
+        return {
+            "total_invested": 0,
+            "total_withdrawn": 0,
+            "unrealized_pnl": portfolio_data["summary"]["total_pnl"],
+            "realized_pnl": 0,
+            "total_profit": portfolio_data["summary"]["total_pnl"],
+            "total_profit_percent": 0,
+            "net_invested": 0
+        }
 
 
 def generate_text_report(portfolio_data: Dict) -> str:
@@ -321,6 +454,8 @@ def generate_text_report(portfolio_data: Dict) -> str:
     
     summary = portfolio_data["summary"]
     positions = portfolio_data["positions"]
+    operations = portfolio_data.get("operations", [])
+    total_profit_info = portfolio_data.get("total_profit_info", {})
     
     report = []
     report.append("=" * 80)
@@ -338,6 +473,27 @@ def generate_text_report(portfolio_data: Dict) -> str:
             if curr != 'RUB':
                 report.append(f"  {curr}/RUB: {rate:.4f}")
     
+    # Общая прибыль портфеля (как в приложении)
+    if total_profit_info:
+        report.append("\n" + "-" * 80)
+        report.append("                      ОБЩАЯ ПРИБЫЛЬ ПОРТФЕЛЯ")
+        report.append("-" * 80)
+        
+        total_invested = total_profit_info.get("total_invested", 0)
+        total_withdrawn = total_profit_info.get("total_withdrawn", 0)
+        net_invested = total_profit_info.get("net_invested", 0)
+        unrealized_pnl = total_profit_info.get("unrealized_pnl", 0)
+        realized_pnl = total_profit_info.get("realized_pnl", 0)
+        total_profit = total_profit_info.get("total_profit", 0)
+        total_profit_percent = total_profit_info.get("total_profit_percent", 0)
+        
+        report.append(f"Общая сумма инвестиций:      {total_invested:,.2f} ₽")
+        report.append(f"Сумма выводов:               {total_withdrawn:,.2f} ₽")
+        report.append(f"Чистые инвестиции:           {net_invested:,.2f} ₽")
+        report.append(f"Реализованная прибыль:       {realized_pnl:,.2f} ₽")
+        report.append(f"Нереализованная прибыль:     {unrealized_pnl:,.2f} ₽")
+        report.append(f"ОБЩАЯ ПРИБЫЛЬ:               {total_profit:,.2f} ₽ ({total_profit_percent:+.2f}%)")
+    
     # Заголовок таблицы позиций
     report.append("\n" + "-" * 80)
     report.append("                            ПОЗИЦИИ")
@@ -349,7 +505,7 @@ def generate_text_report(portfolio_data: Dict) -> str:
     report.append("-" * 80)
     
     # Позиции
-    total_invested = 0
+    total_invested_positions = 0
     for pos in positions:
         ticker = pos['ticker']
         shares = pos['shares']
@@ -361,7 +517,7 @@ def generate_text_report(portfolio_data: Dict) -> str:
         
         # Расчет процента изменения
         invested_amount = cost_basis * shares
-        total_invested += invested_amount
+        total_invested_positions += invested_amount
         pnl_percent = (pnl / invested_amount * 100) if invested_amount > 0 else 0
         
         # Форматирование стоп-лосса
@@ -380,11 +536,11 @@ def generate_text_report(portfolio_data: Dict) -> str:
     total_pnl = summary['total_pnl']
     total_equity = summary['total_equity']
     
-    # Общий процент доходности
-    total_pnl_percent = (total_pnl / total_invested * 100) if total_invested > 0 else 0
+    # Общий процент доходности по позициям
+    total_pnl_percent = (total_pnl / total_invested_positions * 100) if total_invested_positions > 0 else 0
     
     report.append(f"Количество позиций:          {summary['positions_count']}")
-    report.append(f"Инвестированная сумма:       {total_invested:,.2f} ₽")
+    report.append(f"Инвестированная сумма:       {total_invested_positions:,.2f} ₽")
     report.append(f"Текущая стоимость позиций:   {total_positions_value:,.2f} ₽")
     report.append(f"Нереализованная прибыль/убыток: {total_pnl:,.2f} ₽ ({total_pnl_percent:+.2f}%)")
     report.append(f"Свободные средства:          {cash_balance:,.2f} ₽")
@@ -396,6 +552,44 @@ def generate_text_report(portfolio_data: Dict) -> str:
         report.append(f"\nДетализация наличных средств:")
         for currency, amount in cash_balances.items():
             report.append(f"  {currency}: {amount:,.2f}")
+    
+    # История операций
+    if operations:
+        report.append("\n" + "-" * 80)
+        report.append("                         ИСТОРИЯ ОПЕРАЦИЙ")
+        report.append(f"                      (Последние {min(20, len(operations))} операций)")
+        report.append("-" * 80)
+        
+        operation_header = f"{'Дата':<11} {'Тип':<8} {'Тикер':<8} {'Кол-во':<8} {'Цена':<10} {'Сумма':<12} {'Комиссия':<10}"
+        report.append(operation_header)
+        report.append("-" * 80)
+        
+        # Показываем последние 20 операций
+        for op in operations[:20]:
+            date_str = op['date'][:10]  # Только дата без времени
+            op_type = op['type'][:7]    # Сокращаем тип
+            ticker = op['instrument'][:7] if len(op['instrument']) > 7 else op['instrument']
+            quantity = abs(op['quantity'])
+            price = op['price']
+            payment = abs(op['payment'])
+            commission = op['commission']
+            
+            op_line = f"{date_str:<11} {op_type:<8} {ticker:<8} {quantity:<8} {price:<10.2f} {payment:<12.2f} {commission:<10.2f}"
+            report.append(op_line)
+        
+        if len(operations) > 20:
+            report.append(f"\n... и еще {len(operations) - 20} операций")
+        
+        # Статистика по операциям
+        buy_operations = [op for op in operations if op['type'] == 'Покупка']
+        sell_operations = [op for op in operations if op['type'] == 'Продажа']
+        total_commission = sum(op['commission'] for op in operations)
+        
+        report.append(f"\nСтатистика операций:")
+        report.append(f"  Всего операций: {len(operations)}")
+        report.append(f"  Покупок: {len(buy_operations)}")
+        report.append(f"  Продаж: {len(sell_operations)}")
+        report.append(f"  Общие комиссии: {total_commission:,.2f} ₽")
     
     # Анализ и рекомендации
     report.append("\n" + "-" * 80)
@@ -472,13 +666,16 @@ def main():
     # Режим отладки
     debug_mode = input("Включить режим отладки? (y/n): ").strip().lower() == "y"
     
+    # Включение операций и общей прибыли
+    include_operations = input("Включить историю операций и общую прибыль? (y/n): ").strip().lower() == "y"
+    
     # Выбор формата отчета
     save_json = input("Сохранить также JSON файл для отладки? (y/n): ").strip().lower() == "y"
 
     try:
         # Получение данных портфеля
         print("Получение данных портфеля...")
-        portfolio_data = get_portfolio_data(token, debug=debug_mode)
+        portfolio_data = get_portfolio_data(token, debug=debug_mode, include_operations=include_operations)
 
         # Сохранение текстового отчета
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -498,6 +695,15 @@ def main():
         print(f"\n📄 Текстовый отчет сохранен: {report_filename}")
         if save_json:
             print(f"📊 JSON данные сохранены: {json_filename}")
+        
+        if include_operations:
+            operations_count = len(portfolio_data.get("operations", []))
+            print(f"📋 Обработано операций: {operations_count}")
+            
+            total_profit_info = portfolio_data.get("total_profit_info", {})
+            if total_profit_info:
+                total_profit = total_profit_info.get("total_profit", 0)
+                print(f"💰 Общая прибыль портфеля: {total_profit:,.2f} ₽")
         
         print(f"\n✅ Готово! Проверьте файл отчета для детального анализа.")
 

@@ -33,13 +33,13 @@ class PortfolioAnalyzer:
             logger.error(f"Ошибка генерации отчета по портфелю {account_id}: {e}")
             raise
     
-    def calculate_total_pnl_from_inception(self, account_id: str) -> float:
+    def calculate_total_pnl_from_inception(self, account_id: str) -> Dict[str, float]:
         """Расчет общей прибыли с момента открытия счета"""
         try:
             with Client(self.client.token) as client:
-                # Получаем операции за последний год (максимальный период)
+                # Получаем операции с самого начала (максимально доступный период)
                 end_date = datetime.now()
-                start_date = end_date - timedelta(days=365)
+                start_date = datetime(2020, 1, 1)  # Начинаем с 2020 года
                 
                 operations_response = client.operations.get_operations(
                     account_id=account_id,
@@ -48,47 +48,144 @@ class PortfolioAnalyzer:
                     state=OperationState.OPERATION_STATE_EXECUTED
                 )
                 
-                total_invested = Decimal("0")
-                total_dividends = Decimal("0")
+                total_money_in = Decimal("0")     # Общие пополнения
+                total_money_out = Decimal("0")    # Общие выводы
+                total_dividends = Decimal("0")    # Дивиденды и купоны
+                total_commissions = Decimal("0")  # Комиссии
                 
-                # Анализируем операции
+                # Анализируем все операции
                 for operation in operations_response.operations:
-                    if operation.operation_type in [
-                        OperationType.OPERATION_TYPE_BUY,
-                        OperationType.OPERATION_TYPE_SELL
-                    ]:
-                        # Покупки и продажи
-                        payment = self.client.money_value_to_decimal(operation.payment)
-                        if operation.operation_type == OperationType.OPERATION_TYPE_BUY:
-                            total_invested += abs(payment)  # Покупки уменьшают баланс
-                        else:  # SELL
-                            total_invested -= abs(payment)  # Продажи увеличивают баланс
+                    payment = self.client.money_value_to_decimal(operation.payment)
                     
+                    if operation.operation_type == OperationType.OPERATION_TYPE_INPUT:
+                        # Пополнение счета
+                        total_money_in += payment
+                        
+                    elif operation.operation_type == OperationType.OPERATION_TYPE_OUTPUT:
+                        # Вывод средств
+                        total_money_out += abs(payment)
+                        
                     elif operation.operation_type in [
                         OperationType.OPERATION_TYPE_DIVIDEND,
                         OperationType.OPERATION_TYPE_COUPON
                     ]:
                         # Дивиденды и купоны
-                        payment = self.client.money_value_to_decimal(operation.payment)
                         total_dividends += payment
+                        
+                    elif operation.operation_type in [
+                        OperationType.OPERATION_TYPE_BROKER_FEE,
+                        OperationType.OPERATION_TYPE_SERVICE_FEE
+                    ]:
+                        # Комиссии и сборы
+                        total_commissions += abs(payment)
                 
                 # Получаем текущую стоимость портфеля
                 portfolio_data = self.client.get_portfolio_data(account_id)
                 current_equity = Decimal(str(portfolio_data["summary"]["total_equity"]))
                 
-                # Общая прибыль = текущая стоимость + дивиденды - вложения
-                total_pnl = current_equity + total_dividends - total_invested
+                # Правильная формула P&L:
+                # P&L = Текущая стоимость + Выведенные средства + Дивиденды - Вложенные средства - Комиссии
+                net_invested = total_money_in - total_money_out
+                total_pnl = current_equity + total_money_out + total_dividends - total_money_in - total_commissions
                 
-                return float(total_pnl)
+                return {
+                    "total_pnl": float(total_pnl),
+                    "money_invested": float(total_money_in),
+                    "money_withdrawn": float(total_money_out),
+                    "dividends_received": float(total_dividends),
+                    "commissions_paid": float(total_commissions),
+                    "current_equity": float(current_equity),
+                    "net_invested": float(net_invested)
+                }
                 
         except Exception as e:
             logger.warning(f"Не удалось рассчитать P&L с открытия для {account_id}: {e}")
             # Fallback к текущему P&L из позиций
             try:
                 portfolio_data = self.client.get_portfolio_data(account_id)
-                return portfolio_data["summary"]["total_pnl"]
+                return {
+                    "total_pnl": portfolio_data["summary"]["total_pnl"],
+                    "money_invested": 0,
+                    "money_withdrawn": 0,
+                    "dividends_received": 0,
+                    "commissions_paid": 0,
+                    "current_equity": portfolio_data["summary"]["total_equity"],
+                    "net_invested": 0
+                }
             except:
-                return 0.0
+                return {
+                    "total_pnl": 0,
+                    "money_invested": 0,
+                    "money_withdrawn": 0,
+                    "dividends_received": 0,
+                    "commissions_paid": 0,
+                    "current_equity": 0,
+                    "net_invested": 0
+                }
+    
+    def get_trading_history(self, account_id: str, days: int = 30) -> List[Dict]:
+        """Получение истории торговых операций"""
+        try:
+            with Client(self.client.token) as client:
+                end_date = datetime.now()
+                start_date = end_date - timedelta(days=days)
+                
+                operations_response = client.operations.get_operations(
+                    account_id=account_id,
+                    from_=start_date,
+                    to=end_date,
+                    state=OperationState.OPERATION_STATE_EXECUTED
+                )
+                
+                trading_operations = []
+                
+                for operation in operations_response.operations:
+                    if operation.operation_type in [
+                        OperationType.OPERATION_TYPE_BUY,
+                        OperationType.OPERATION_TYPE_SELL
+                    ]:
+                        # Получаем информацию об инструменте
+                        instrument_name = "Unknown"
+                        ticker = "UNKNOWN"
+                        
+                        try:
+                            if operation.instrument_type == "share":
+                                instrument = client.instruments.share_by(id_type=1, id=operation.figi)
+                            elif operation.instrument_type == "bond":
+                                instrument = client.instruments.bond_by(id_type=1, id=operation.figi)
+                            elif operation.instrument_type == "etf":
+                                instrument = client.instruments.etf_by(id_type=1, id=operation.figi)
+                            else:
+                                continue
+                            
+                            instrument_name = instrument.instrument.name
+                            ticker = instrument.instrument.ticker
+                        except:
+                            pass
+                        
+                        payment = self.client.money_value_to_decimal(operation.payment)
+                        quantity = operation.quantity
+                        price = abs(payment) / quantity if quantity > 0 else 0
+                        
+                        trading_operations.append({
+                            "date": operation.date.strftime('%d.%m.%Y %H:%M'),
+                            "operation_type": "Покупка" if operation.operation_type == OperationType.OPERATION_TYPE_BUY else "Продажа",
+                            "ticker": ticker,
+                            "instrument_name": instrument_name,
+                            "quantity": int(quantity),
+                            "price": float(price),
+                            "amount": float(abs(payment)),
+                            "currency": operation.currency
+                        })
+                
+                # Сортируем по дате (новые первыми)
+                trading_operations.sort(key=lambda x: datetime.strptime(x["date"], '%d.%m.%Y %H:%M'), reverse=True)
+                
+                return trading_operations
+                
+        except Exception as e:
+            logger.error(f"Ошибка получения истории операций: {e}")
+            return []
     
     def get_positions_near_stop_loss(self, account_id: str, threshold_percent: float = 5.0) -> List[Dict]:
         """Получение позиций близко к стоп-лоссу"""
